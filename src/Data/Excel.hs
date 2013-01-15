@@ -83,16 +83,16 @@ openExcelx f = do
   archive <- BS.readFile f
   return $ toExcelx archive
 
-parseCell cellpos xmlSheet xlsx = 
+parseCell xmlSheet cellpos xlsx = 
   let at = a1form cellpos 
       cursor = xmlSheet $// (laxElement "c") >=> attributeIs "r" at in
   case listToMaybe cursor of
-    Nothing -> (Nothing,Nothing)
-    Just c -> (Just c, msum $ map (\p -> p xlsx at c) [parseFormulaCell,
+    Nothing -> Nothing
+    Just c -> msum $ map (\p -> p xlsx at c) [parseFormulaCell,
                                               parseDateCell,
                                               parseNumericCell,
                                               parseTextCell,
-                                              parseBlankCell])
+                                              parseBlankCell]
       where
         cellContents tag xml = xml $.// laxElement tag &.// content
         
@@ -109,7 +109,7 @@ parseCell cellpos xmlSheet xlsx =
           val <- listToMaybe $ cellContents "v" xml 
           return $ TextCell (A1 at) (sharedStrings xlsx !! (read $ T.unpack val))
             
-        parseNumericCell xlsx at xml = do 
+        parseNumericCell xlsx at xml = do
           v <- listToMaybe $ cellContents "v" xml
           return $ NumericCell (A1 at) (read $ T.unpack v)
             
@@ -131,5 +131,8 @@ extractSheet sheetname xlsx = do
 
 sheet name = liftM (extractSheet name) ask
 cell sheet pos = liftM (parseCell sheet pos) ask
+column sheet colidx = 
+    let column = map (\r -> R1C1 colidx r) [1..] in 
+    mapM (cell sheet) column
 
-runExcel = flip runReader 
+runExcel = flip runReader
