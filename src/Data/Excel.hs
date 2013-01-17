@@ -1,9 +1,8 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, FlexibleContexts, FlexibleInstances #-}
+
 module Data.Excel where
 
-
 import Data.Maybe
-import qualified Data.Map as M 
 import Data.Monoid
 
 import Data.Time.LocalTime
@@ -18,8 +17,6 @@ import Codec.Archive.Zip
 
 import Text.XML as XML
 import Text.XML.Cursor 
-import Text.XML.Scraping (innerTextN)
-import Text.XML.Selector.TH
 
 type Formula = T.Text
 data Position = R1C1 Int Int | A1 T.Text deriving Show
@@ -56,13 +53,13 @@ instance FromCell String where
     fromCell c = T.unpack $ fromCell c
 
 instance FromCell Day where
-    fromCell c = addDays (fromCell c) beginning where beginning = fromGregorian 1899 12 30
+    fromCell c = addDays (fromCell c) (fromGregorian 1899 12 30)
 
 instance FromCell TimeOfDay where
     fromCell c = dayFractionToTimeOfDay part
         where
-          doub = fromCell c :: Double
-          part = toRational (doub - (fromInteger $ floor doub))
+          d = fromCell c :: Double
+          part = toRational $ d - (fromInteger $ floor d)
 
 instance FromCell LocalTime where
     fromCell c = LocalTime (fromCell c) (fromCell c)
@@ -82,38 +79,25 @@ a1form (R1C1 i j) = T.toUpper . T.pack $ alpha (max j 1) ++ show (max i 1)
 findXMLEntry :: FilePath -> Archive -> Maybe Cursor
 findXMLEntry path ar =
   fmap (fromDocument . parseLBS_ def . fromEntry) $ findEntryByPath path ar
-
-nodeElement :: Node -> Maybe Element
-nodeElement (NodeElement el) = Just el
-nodeElement _ = Nothing
   
 extractSheetIndex :: Archive -> Maybe [(T.Text, String)]
 extractSheetIndex ar = do
   sheetXml <- findXMLEntry "xl/workbook.xml" ar
-  rels <- findXMLEntry "xl/_rels/workbook.xml.rels" ar
-  let relationships = map (fmap elementAttributes . nodeElement . node) $ queryT [jq| Relationship |] rels 
-      sheetListing = map (fmap elementAttributes . nodeElement . node) $ queryT [jq| sheet |] sheetXml
-  return $ catMaybes $ do
-    let relrid = fmap (M.lookup "Id")
-        sheetrid = fmap (M.lookup rIdattrname)
-    sheetListXml <- sheetListing
-    rel <- relationships
-    guard $ (relrid rel) == (sheetrid sheetListXml)
-    return $ do
-      jsheet <- sheetListXml
-      jrel <- rel
-      sheetName <- M.lookup "name" jsheet
-      target <- fmap (mappend "xl/") $ M.lookup "Target" jrel
-      return (sheetName, T.unpack target)
-  where 
-    rIdattrname = Name {nameLocalName = "id",
-                        nameNamespace = Just "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-                        namePrefix = Just "r"}
+  relXml <- findXMLEntry "xl/_rels/workbook.xml.rels" ar
+  return $ do
+    let relationships = relXml $.// laxElement "Relationship"
+        sheetListings =  sheetXml $.// laxElement "sheet"
+    sheetListingEntry <- sheetListings 
+    relationship <- relationships
+    guard $ ((laxAttribute "Id") relationship) == ((laxAttribute "id") sheetListingEntry)
+    sheetName <- (laxAttribute "Name") sheetListingEntry
+    target <- (laxAttribute "Target") relationship
+    return (sheetName, T.unpack $ mappend "xl/" target)
 
 extractSharedStrings :: Archive -> Maybe [T.Text]
 extractSharedStrings ar = do
   sharedStringXml <- findXMLEntry "xl/sharedStrings.xml" ar
-  return $ map (innerTextN . node) $ queryT [jq| sst si |] sharedStringXml
+  return $ sharedStringXml $.// laxElement "sst" &/ laxElement "si" &.// content
 
 parseCell :: Cursor -> Position -> Excelx -> Maybe Cell
 parseCell xmlSheet cellpos xlsx = 
