@@ -1,10 +1,12 @@
-{-# LANGUAGE QuasiQuotes, OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes, OverloadedStrings, FlexibleContexts, FlexibleInstances #-}
 module Data.Excel where
 
-import Data.List
+
 import Data.Maybe
 import qualified Data.Map as M 
 import Data.Monoid
+
+import Data.Time.LocalTime
 import Data.Time.Calendar
 
 import Control.Monad
@@ -16,123 +18,158 @@ import Codec.Archive.Zip
 
 import Text.XML as XML
 import Text.XML.Cursor 
-import Text.XML.Scraping (innerText, innerTextN)
+import Text.XML.Scraping (innerTextN)
 import Text.XML.Selector.TH
 
 type Formula = T.Text
 data Position = R1C1 Int Int | A1 T.Text deriving Show
 data Cell = NumericCell Position Double
-          | DateCell Position Day 
-          | TextCell Position T.Text 
-          | FormulaCell Position Formula Cell 
+          | TextCell Position T.Text
+          | FormulaCell Position Formula Cell
           | BlankCell Position deriving Show
 
 type SheetIndex = [(T.Text, FilePath)]
 data Excelx = Excelx {sharedStrings :: [T.Text], sheetIndex :: SheetIndex, archive :: Archive}
 
+valueCell :: Cell -> Cell
+valueCell (FormulaCell _ _ valuecell) = valuecell
+valueCell valuecell = valuecell
+
+class FromCell a where
+    fromCell :: Cell -> a
+
+instance FromCell Double where
+    fromCell c = case valueCell c of
+                   NumericCell _ d -> d
+                   _ -> 0.0
+
+instance FromCell Integer where
+    fromCell c = floor (fromCell c :: Double)
+
+instance FromCell T.Text where
+    fromCell c = case valueCell c of
+                   TextCell _ t -> t
+                   NumericCell _ t -> T.pack $ show t
+                   _ -> ""
+
+instance FromCell String where
+    fromCell c = T.unpack $ fromCell c
+
+instance FromCell Day where
+    fromCell c = addDays (fromCell c) beginning where beginning = fromGregorian 1899 12 30
+
+instance FromCell TimeOfDay where
+    fromCell c = dayFractionToTimeOfDay part
+        where
+          doub = fromCell c :: Double
+          part = toRational (doub - (fromInteger $ floor doub))
+
+instance FromCell LocalTime where
+    fromCell c = LocalTime (fromCell c) (fromCell c)
+
+instance FromCell a => FromCell (Maybe a) where
+    fromCell c = case valueCell c of
+                   BlankCell _ -> Nothing
+                   _ -> Just (fromCell c)
+    
+a1form :: Position -> T.Text
 a1form (A1 t) = t
-a1form (R1C1 i j) = T.toUpper . T.pack $ (alpha (max i 1)) ++ show (max j 1)
+a1form (R1C1 i j) = T.toUpper . T.pack $ alpha (max j 1) ++ show (max i 1)
   where 
     alphabet = map reverse [c : s | s <- "" : alphabet, c <- ['a' .. 'z']]
-    alpha i = alphabet !! (i - 1)
+    alpha idx = alphabet !! (idx - 1)
           
-
 findXMLEntry :: FilePath -> Archive -> Maybe Cursor
-findXMLEntry path archive =
-  fmap (fromDocument . (parseLBS_ def) . fromEntry) $ findEntryByPath path archive 
+findXMLEntry path ar =
+  fmap (fromDocument . parseLBS_ def . fromEntry) $ findEntryByPath path ar
 
 nodeElement :: Node -> Maybe Element
-nodeElement (NodeElement element) = Just element
+nodeElement (NodeElement el) = Just el
 nodeElement _ = Nothing
   
 extractSheetIndex :: Archive -> Maybe [(T.Text, String)]
-extractSheetIndex archive = do
-  sheetXml <- findXMLEntry "xl/workbook.xml" archive
-  rels <- findXMLEntry "xl/_rels/workbook.xml.rels" archive
-  let relationships = map (fmap elementAttributes) $ map (nodeElement . node) $ queryT [jq| Relationship |] rels 
-      sheetListing = map (fmap elementAttributes) $ map (nodeElement . node) $ queryT [jq| sheet |] sheetXml
+extractSheetIndex ar = do
+  sheetXml <- findXMLEntry "xl/workbook.xml" ar
+  rels <- findXMLEntry "xl/_rels/workbook.xml.rels" ar
+  let relationships = map (fmap elementAttributes . nodeElement . node) $ queryT [jq| Relationship |] rels 
+      sheetListing = map (fmap elementAttributes . nodeElement . node) $ queryT [jq| sheet |] sheetXml
   return $ catMaybes $ do
     let relrid = fmap (M.lookup "Id")
         sheetrid = fmap (M.lookup rIdattrname)
-    sheet <- sheetListing
+    sheetListXml <- sheetListing
     rel <- relationships
-    guard $ (relrid rel) == (sheetrid sheet)
+    guard $ (relrid rel) == (sheetrid sheetListXml)
     return $ do
-      jsheet <- sheet
+      jsheet <- sheetListXml
       jrel <- rel
       sheetName <- M.lookup "name" jsheet
       target <- fmap (mappend "xl/") $ M.lookup "Target" jrel
       return (sheetName, T.unpack target)
   where 
-    rIdattrname = Name {nameLocalName = "id", nameNamespace = Just "http://schemas.openxmlformats.org/officeDocument/2006/relationships", namePrefix = Just "r"}
+    rIdattrname = Name {nameLocalName = "id",
+                        nameNamespace = Just "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                        namePrefix = Just "r"}
 
 extractSharedStrings :: Archive -> Maybe [T.Text]
-extractSharedStrings archive = do
-  sharedStringXml <- findXMLEntry "xl/sharedStrings.xml" archive
+extractSharedStrings ar = do
+  sharedStringXml <- findXMLEntry "xl/sharedStrings.xml" ar
   return $ map (innerTextN . node) $ queryT [jq| sst si |] sharedStringXml
-  
-toExcelx :: BS.ByteString -> Maybe Excelx
-toExcelx bytes = do
-  let archive = toArchive bytes
-  sharedStringList <- extractSharedStrings archive
-  sheetIndex <- extractSheetIndex archive
-  return $ Excelx sharedStringList sheetIndex archive
-  
-openExcelx :: FilePath -> IO (Maybe Excelx)
-openExcelx f = do
-  archive <- BS.readFile f
-  return $ toExcelx archive
 
+parseCell :: Cursor -> Position -> Excelx -> Maybe Cell
 parseCell xmlSheet cellpos xlsx = 
   let at = a1form cellpos 
-      cursor = xmlSheet $// (laxElement "c") >=> attributeIs "r" at in
+      cursor = xmlSheet $// laxElement "c" >=> attributeIs "r" at in
   case listToMaybe cursor of
     Nothing -> Nothing
     Just c -> msum $ map (\p -> p xlsx at c) [parseFormulaCell,
-                                              parseDateCell,
                                               parseNumericCell,
                                               parseTextCell,
                                               parseBlankCell]
       where
-        cellContents tag xml = xml $.// laxElement tag &.// content
-        
+        cellContents tag xml = xml $.// laxElement tag &.// content    
+
         parseFormulaCell xlsx at xml = do
           formula <- listToMaybe $ cellContents "f" xml
           return $ FormulaCell (A1 at) formula $ 
-            fromMaybe (BlankCell (A1 at)) $ msum [parseDateCell xlsx at xml,
-                                                  parseNumericCell xlsx at xml,
+            fromMaybe (BlankCell (A1 at)) $ msum [parseNumericCell xlsx at xml,
                                                   parseTextCell xlsx at xml,
-                                                  parseBlankCell xlsx at xml]
-            
+                                                  parseBlankCell xlsx at xml]        
         parseTextCell xlsx at xml = do
-          cell <- listToMaybe $ xml $.// attributeIs "t" "s" 
-          val <- listToMaybe $ cellContents "v" xml 
-          return $ TextCell (A1 at) (sharedStrings xlsx !! (read $ T.unpack val))
-            
+          textcell <- listToMaybe $ xml $.// attributeIs "t" "s" 
+          val <- listToMaybe $ cellContents "v" textcell
+          return $ TextCell (A1 at) (sharedStrings xlsx !! read (T.unpack val))
+     
         parseNumericCell xlsx at xml = do
           v <- listToMaybe $ cellContents "v" xml
           return $ NumericCell (A1 at) (read $ T.unpack v)
             
-        parseDateCell xlsx at xml = do
-          style <- listToMaybe $ xml $.// attribute "s"
-          if isDateStyle style then
-            (do v <- listToMaybe $ cellContents "v" xml
-                let date = addDays diff $ fromGregorian 1899 12 30
-                    diff = read $ T.unpack v
-                return $ DateCell (A1 at) date)
-            else mzero
-            where isDateStyle = (`elem` ["30", "31", "39", "14"])
-            
         parseBlankCell xlsx at xml = return $ BlankCell (A1 at)
 
+extractSheet :: T.Text -> Excelx -> Maybe Cursor
 extractSheet sheetname xlsx = do
   sheetPath <- lookup sheetname $ sheetIndex xlsx
   findXMLEntry sheetPath $ archive xlsx
+  
+toExcelx :: BS.ByteString -> Maybe Excelx
+toExcelx bytes = do
+  let ar = toArchive bytes
+  sharedStringList <- extractSharedStrings ar
+  sheetIdx <- extractSheetIndex ar
+  return $ Excelx sharedStringList sheetIdx ar
 
+openExcelx :: FilePath -> IO (Maybe Excelx)
+openExcelx f = do
+  ar <- BS.readFile f
+  return $ toExcelx ar
+
+sheet :: MonadReader Excelx m => T.Text -> m (Maybe Cursor)
 sheet name = liftM (extractSheet name) ask
-cell sheet pos = liftM (parseCell sheet pos) ask
-column sheet colidx = 
-    let column = map (\r -> R1C1 colidx r) [1..] in 
-    mapM (cell sheet) column
 
+cell :: MonadReader Excelx m => Cursor -> Position -> m (Maybe Cell)
+cell sheetCur cellpos = liftM (parseCell sheetCur cellpos) ask
+
+column :: MonadReader Excelx m => Cursor -> Int -> m [Maybe Cell]
+column sheetCur colidx = mapM (cell sheetCur) col where col = map (flip R1C1 colidx) [1..]
+
+runExcel :: b -> Reader b c -> c
 runExcel = flip runReader
