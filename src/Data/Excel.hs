@@ -25,9 +25,6 @@ data Cell = NumericCell Position Double
           | FormulaCell Position Formula Cell
           | BlankCell Position deriving Show
 
-type SheetIndex = [(T.Text, FilePath)]
-data Excelx = Excelx {sharedStrings :: [T.Text], sheetIndex :: SheetIndex, archive :: Archive}
-
 valueCell :: Cell -> Cell
 valueCell (FormulaCell _ _ valuecell) = valuecell
 valueCell valuecell = valuecell
@@ -68,17 +65,24 @@ instance FromCell a => FromCell (Maybe a) where
     fromCell c = case valueCell c of
                    BlankCell _ -> Nothing
                    _ -> Just (fromCell c)
-    
+
 a1form :: Position -> T.Text
 a1form (A1 t) = t
 a1form (R1C1 i j) = T.toUpper . T.pack $ alpha (max j 1) ++ show (max i 1)
   where 
     alphabet = map reverse [c : s | s <- "" : alphabet, c <- ['a' .. 'z']]
     alpha idx = alphabet !! (idx - 1)
+
+type SharedStringIndex = [T.Text]
+type SheetIndex = [(T.Text, FilePath)]
+data Excelx = Excelx {archive :: Archive, sharedStrings :: SharedStringIndex, sheetIndex :: SheetIndex}
           
 findXMLEntry :: FilePath -> Archive -> Maybe Cursor
-findXMLEntry path ar =
-  fmap (fromDocument . parseLBS_ def . fromEntry) $ findEntryByPath path ar
+findXMLEntry path ar = do
+  entry <- findEntryByPath path ar
+  case parseLBS def (fromEntry entry) of
+    Left _ -> fail $ "Invalid entry: " ++ path 
+    Right xml -> return $ fromDocument xml
   
 extractSheetIndex :: Archive -> Maybe [(T.Text, String)]
 extractSheetIndex ar = do
@@ -89,7 +93,7 @@ extractSheetIndex ar = do
         sheetListings =  sheetXml $.// laxElement "sheet"
     sheetListingEntry <- sheetListings 
     relationship <- relationships
-    guard $ ((laxAttribute "Id") relationship) == ((laxAttribute "id") sheetListingEntry)
+    guard $ (laxAttribute "Id") relationship == (laxAttribute "id") sheetListingEntry
     sheetName <- (laxAttribute "Name") sheetListingEntry
     target <- (laxAttribute "Target") relationship
     return (sheetName, T.unpack $ mappend "xl/" target)
@@ -99,35 +103,37 @@ extractSharedStrings ar = do
   sharedStringXml <- findXMLEntry "xl/sharedStrings.xml" ar
   return $ sharedStringXml $.// laxElement "sst" &/ laxElement "si" &.// content
 
-parseCell :: Cursor -> Position -> Excelx -> Maybe Cell
-parseCell xmlSheet cellpos xlsx = 
+parseCell :: Excelx -> Cursor -> Position -> Maybe Cell
+parseCell xlsx xmlSheet cellpos = 
   let at = a1form cellpos 
       cursor = xmlSheet $// laxElement "c" >=> attributeIs "r" at in
   case listToMaybe cursor of
     Nothing -> Nothing
-    Just c -> msum $ map (\p -> p xlsx at c) [parseFormulaCell,
-                                              parseNumericCell,
-                                              parseTextCell,
-                                              parseBlankCell]
+    Just c -> 
+        let formulaCell = do
+              formula <- listToMaybe $ cellContents "f" c
+              let valcell = fromMaybe (BlankCell cellpos) $ msum [textCell, numericCell, blankCell]
+              return $ FormulaCell cellpos formula valcell
+            textCell = do
+              textcell <- listToMaybe $ c $.// attributeIs "t" "s"
+              val <- listToMaybe $ cellContents "v" textcell
+              return $ TextCell cellpos (sharedStrings xlsx !! read (T.unpack val))
+            numericCell = do
+              v <- listToMaybe $ cellContents "v" c
+              return $ NumericCell cellpos (read $ T.unpack v)
+            blankCell = return $ BlankCell cellpos
+        in msum [formulaCell, textCell, numericCell, blankCell]
       where
         cellContents tag xml = xml $.// laxElement tag &.// content    
 
-        parseFormulaCell xlsx at xml = do
-          formula <- listToMaybe $ cellContents "f" xml
-          return $ FormulaCell (A1 at) formula $ 
-            fromMaybe (BlankCell (A1 at)) $ msum [parseNumericCell xlsx at xml,
-                                                  parseTextCell xlsx at xml,
-                                                  parseBlankCell xlsx at xml]        
-        parseTextCell xlsx at xml = do
-          textcell <- listToMaybe $ xml $.// attributeIs "t" "s" 
-          val <- listToMaybe $ cellContents "v" textcell
-          return $ TextCell (A1 at) (sharedStrings xlsx !! read (T.unpack val))
-     
-        parseNumericCell xlsx at xml = do
-          v <- listToMaybe $ cellContents "v" xml
-          return $ NumericCell (A1 at) (read $ T.unpack v)
-            
-        parseBlankCell xlsx at xml = return $ BlankCell (A1 at)
+parseRow :: Excelx -> Cursor -> Integer -> [Maybe Cell]
+parseRow xlsx sheetCur rownum = 
+    let row = sheetCur $// laxElement "row" >=> attributeIs "r" (T.pack $ show rownum)
+        addrs = concatMap (laxElement "c" >=> attribute "r") row
+    in map (parseCell xlsx sheetCur) (map A1 addrs)
+
+maxRow :: Cursor -> Int
+maxRow sheetxml = foldr max 0 $ map (read . T.unpack) (sheetxml $.// element "row" &.// attribute "r")
 
 extractSheet :: T.Text -> Excelx -> Maybe Cursor
 extractSheet sheetname xlsx = do
@@ -139,7 +145,7 @@ toExcelx bytes = do
   let ar = toArchive bytes
   sharedStringList <- extractSharedStrings ar
   sheetIdx <- extractSheetIndex ar
-  return $ Excelx sharedStringList sheetIdx ar
+  return $ Excelx ar sharedStringList sheetIdx
 
 openExcelx :: FilePath -> IO (Maybe Excelx)
 openExcelx f = do
@@ -150,10 +156,10 @@ sheet :: MonadReader Excelx m => T.Text -> m (Maybe Cursor)
 sheet name = liftM (extractSheet name) ask
 
 cell :: MonadReader Excelx m => Cursor -> Position -> m (Maybe Cell)
-cell sheetCur cellpos = liftM (parseCell sheetCur cellpos) ask
+cell sheetCur cellpos = liftM (\xlsx -> parseCell xlsx sheetCur cellpos) ask
 
 column :: MonadReader Excelx m => Cursor -> Int -> m [Maybe Cell]
-column sheetCur colidx = mapM (cell sheetCur) col where col = map (flip R1C1 colidx) [1..]
+column sheetCur colidx = mapM (cell sheetCur) $ map (flip R1C1 colidx) [1 .. maxRow sheetCur]
 
 runExcel :: b -> Reader b c -> c
 runExcel = flip runReader
