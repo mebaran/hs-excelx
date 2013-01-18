@@ -152,19 +152,39 @@ openExcelx f = do
   ar <- BS.readFile f
   return $ toExcelx ar
 
-type Sheet = Cursor
+type Sheet = (Excelx, Cursor)
 
 sheet :: MonadReader Excelx m => T.Text -> m (Maybe Sheet)
-sheet name = liftM (extractSheet name) ask
+sheet name = do
+  xlsx <- ask
+  let sheetx = extractSheet name xlsx
+  return $ fmap (\sheetxml -> (xlsx, sheetxml)) sheetx
 
-row :: MonadReader Excelx m => Sheet -> Integer -> m [Maybe Cell]
-row sheetCur rownum = liftM (\xlsx -> parseRow xlsx sheetCur rownum) ask
+row :: MonadReader Sheet m => Integer -> m [Maybe Cell]
+row num = do
+  (xlsx, sheetx) <- ask
+  return $ parseRow xlsx sheetx num
 
-cell :: MonadReader Excelx m => Sheet -> Position -> m (Maybe Cell)
-cell sheetCur cellpos = liftM (\xlsx -> parseCell xlsx sheetCur cellpos) ask
+cell :: MonadReader Sheet m => Position -> m (Maybe Cell)  
+cell cellpos = do
+  (xlsx, sheetx) <- ask
+  return $ parseCell xlsx sheetx cellpos
 
-column :: MonadReader Excelx m => Sheet -> Int -> m [Maybe Cell]
-column sheetCur colidx = mapM (cell sheetCur) $ map (flip R1C1 colidx) [1 .. maxRow sheetCur]
+column :: MonadReader Sheet m => Int -> m [Maybe Cell]
+column colidx = do
+  (_, sheetx) <- ask
+  let maxr = maxRow sheetx
+  mapM cell $ map (flip R1C1 colidx) [1 .. maxr]
 
-runExcel :: b -> Reader b c -> c
-runExcel = flip runReader
+inExcel :: b -> Reader b c -> c
+inExcel = flip runReader
+
+inSheet :: MonadReader Excelx m => T.Text -> Reader Sheet a -> m (Maybe a)
+inSheet name action = do
+  maybeSheet <- sheet name
+  case maybeSheet of
+    Just sheetx -> return $ Just $ runReader action sheetx
+    Nothing -> return Nothing
+
+inExcelSheet :: Excelx -> T.Text -> Reader Sheet a -> Maybe a
+inExcelSheet xlsx name action = inExcel xlsx $ inSheet name action
