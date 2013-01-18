@@ -128,8 +128,8 @@ parseCell xlsx xmlSheet cellpos =
 
 parseRow :: Excelx -> Cursor -> Integer -> [Maybe Cell]
 parseRow xlsx sheetCur rownum = 
-    let row = sheetCur $// laxElement "row" >=> attributeIs "r" (T.pack $ show rownum)
-        addrs = concatMap (laxElement "c" >=> attribute "r") row
+    let rowxml = sheetCur $// laxElement "row" >=> attributeIs "r" (T.pack $ show rownum)
+        addrs = concatMap (laxElement "c" >=> attribute "r") rowxml
     in map (parseCell xlsx sheetCur) (map A1 addrs)
 
 maxRow :: Cursor -> Int
@@ -152,13 +152,18 @@ openExcelx f = do
   ar <- BS.readFile f
   return $ toExcelx ar
 
-sheet :: MonadReader Excelx m => T.Text -> m (Maybe Cursor)
+type Sheet = Cursor
+
+sheet :: MonadReader Excelx m => T.Text -> m (Maybe Sheet)
 sheet name = liftM (extractSheet name) ask
 
-cell :: MonadReader Excelx m => Cursor -> Position -> m (Maybe Cell)
+row :: MonadReader Excelx m => Sheet -> Integer -> m [Maybe Cell]
+row sheetCur rownum = liftM (\xlsx -> parseRow xlsx sheetCur rownum) ask
+
+cell :: MonadReader Excelx m => Sheet -> Position -> m (Maybe Cell)
 cell sheetCur cellpos = liftM (\xlsx -> parseCell xlsx sheetCur cellpos) ask
 
-column :: MonadReader Excelx m => Cursor -> Int -> m [Maybe Cell]
+column :: MonadReader Excelx m => Sheet -> Int -> m [Maybe Cell]
 column sheetCur colidx = mapM (cell sheetCur) $ map (flip R1C1 colidx) [1 .. maxRow sheetCur]
 
 runExcel :: b -> Reader b c -> c
