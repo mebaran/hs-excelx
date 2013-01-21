@@ -1,6 +1,8 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, FlexibleContexts, FlexibleInstances #-}
 
-module Data.Excel where
+module Data.Excelx(openExcelx, toExcelx,
+                   sheet, cell, row, rows, column,
+                   fromCell) where
 
 import Data.Maybe
 import Data.Monoid
