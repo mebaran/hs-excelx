@@ -23,7 +23,8 @@ data Position = R1C1 Int Int | A1 T.Text deriving Show
 data Cell = NumericCell Position Double
           | TextCell Position T.Text
           | FormulaCell Position Formula Cell
-          | BlankCell Position deriving Show
+          | BlankCell Position 
+          | NoCell Position deriving Show
 
 valueCell :: Cell -> Cell
 valueCell (FormulaCell _ _ valuecell) = valuecell
@@ -64,7 +65,19 @@ instance FromCell LocalTime where
 instance FromCell a => FromCell (Maybe a) where
     fromCell c = case valueCell c of
                    BlankCell _ -> Nothing
+                   NoCell _ -> Nothing
                    _ -> Just (fromCell c)
+
+instance FromCell a => FromCell (Either Position a) where
+    fromCell c = case valueCell c of
+                   NoCell pos -> Left pos
+                   _ -> Right $ fromCell c
+
+catCells :: [Cell] -> [Cell]
+catCells cells = filter noCell cells
+    where noCell c = case c of
+              NoCell _ -> True
+              _ -> False
 
 a1form :: Position -> T.Text
 a1form (A1 t) = t
@@ -101,14 +114,15 @@ extractSheetIndex ar = do
 extractSharedStrings :: Archive -> Maybe [T.Text]
 extractSharedStrings ar = do
   sharedStringXml <- findXMLEntry "xl/sharedStrings.xml" ar
-  return $ sharedStringXml $.// laxElement "sst" &/ laxElement "si" &.// content
+  let entries = sharedStringXml $.// laxElement "si"
+  return $ map mconcat $ map (\e -> e $// laxElement "t" &/ content) entries
 
-parseCell :: Excelx -> Cursor -> Position -> Maybe Cell
+parseCell :: Excelx -> Cursor -> Position -> Cell
 parseCell xlsx xmlSheet cellpos = 
   let at = a1form cellpos 
       cursor = xmlSheet $// laxElement "c" >=> attributeIs "r" at in
   case listToMaybe cursor of
-    Nothing -> Nothing
+    Nothing -> NoCell cellpos
     Just c -> 
         let formulaCell = do
               formula <- listToMaybe $ cellContents "f" c
@@ -117,23 +131,23 @@ parseCell xlsx xmlSheet cellpos =
             textCell = do
               textcell <- listToMaybe $ c $.// attributeIs "t" "s"
               val <- listToMaybe $ cellContents "v" textcell
-              return $ TextCell cellpos (sharedStrings xlsx !! read (T.unpack val))
+              return $ TextCell cellpos (sharedStrings xlsx !! (read (T.unpack val)))
             numericCell = do
               v <- listToMaybe $ cellContents "v" c
               return $ NumericCell cellpos (read $ T.unpack v)
             blankCell = return $ BlankCell cellpos
-        in msum [formulaCell, textCell, numericCell, blankCell]
+        in fromJust $ msum [formulaCell, textCell, numericCell, blankCell]
       where
-        cellContents tag xml = xml $.// laxElement tag &.// content    
+        cellContents tag xml = xml $.// laxElement tag &.// content
 
-parseRow :: Excelx -> Cursor -> Integer -> [Maybe Cell]
+parseRow :: Excelx -> Cursor -> Int -> [Cell]
 parseRow xlsx sheetCur rownum = 
     let rowxml = sheetCur $// laxElement "row" >=> attributeIs "r" (T.pack $ show rownum)
-        addrs = concatMap (laxElement "c" >=> attribute "r") rowxml
+        addrs = concatMap (\rx -> rx $// laxElement "c" >=> attribute "r") rowxml
     in map (parseCell xlsx sheetCur) (map A1 addrs)
 
 maxRow :: Cursor -> Int
-maxRow sheetxml = foldr max 0 $ map (read . T.unpack) (sheetxml $.// element "row" &.// attribute "r")
+maxRow sheetxml = foldr max 0 $ map (read . T.unpack) $ sheetxml $.// laxElement "row" >=> laxAttribute "r"
 
 extractSheet :: T.Text -> Excelx -> Maybe Cursor
 extractSheet sheetname xlsx = do
@@ -153,6 +167,7 @@ openExcelx f = do
   return $ toExcelx ar
 
 type Sheet = (Excelx, Cursor)
+type Row = [Cell]
 
 sheet :: MonadReader Excelx m => T.Text -> m (Maybe Sheet)
 sheet name = do
@@ -160,21 +175,25 @@ sheet name = do
   let sheetx = extractSheet name xlsx
   return $ fmap (\sheetxml -> (xlsx, sheetxml)) sheetx
 
-row :: MonadReader Sheet m => Integer -> m [Maybe Cell]
+row :: MonadReader Sheet m => Int -> m Row
 row num = do
   (xlsx, sheetx) <- ask
   return $ parseRow xlsx sheetx num
 
-cell :: MonadReader Sheet m => Position -> m (Maybe Cell)  
+rows :: MonadReader Sheet m => m [Row]
+rows = do
+  (_, sheetx) <- ask
+  mapM row [1 .. maxRow sheetx]
+
+cell :: MonadReader Sheet m => Position -> m (Cell)  
 cell cellpos = do
   (xlsx, sheetx) <- ask
   return $ parseCell xlsx sheetx cellpos
 
-column :: MonadReader Sheet m => Int -> m [Maybe Cell]
+column :: MonadReader Sheet m => Int -> m [Cell]
 column colidx = do
   (_, sheetx) <- ask
-  let maxr = maxRow sheetx
-  mapM cell $ map (flip R1C1 colidx) [1 .. maxr]
+  liftM catCells $ mapM cell $ map (flip R1C1 colidx) [1 .. maxRow sheetx]
 
 inExcel :: b -> Reader b c -> c
 inExcel = flip runReader
