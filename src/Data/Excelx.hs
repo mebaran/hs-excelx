@@ -40,6 +40,12 @@ instance FromCell Double where
                    NumericCell _ d -> d
                    _ -> 0.0
 
+instance FromCell Bool where
+    fromCell c = case valueCell c of
+                   NumericCell _ d -> d > 0.0
+                   TextCell _ t -> T.length t > 0
+                   _ -> False
+
 instance FromCell Integer where
     fromCell c = floor (fromCell c :: Double)
 
