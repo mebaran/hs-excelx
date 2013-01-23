@@ -1,8 +1,6 @@
 {-# LANGUAGE QuasiQuotes, OverloadedStrings, FlexibleContexts, FlexibleInstances #-}
 
-module Data.Excelx(openExcelx, toExcelx,
-                   sheet, cell, row, rows, column,
-                   fromCell) where
+module Data.Excelx where
 
 import Data.Maybe
 import Data.Monoid
@@ -27,10 +25,6 @@ data Cell = NumericCell Position Double
           | FormulaCell Position Formula Cell
           | BlankCell Position 
           | NoCell Position deriving Show
-
-valueCell :: Cell -> Cell
-valueCell (FormulaCell _ _ valuecell) = valuecell
-valueCell valuecell = valuecell
 
 class FromCell a where
     fromCell :: Cell -> a
@@ -80,6 +74,10 @@ instance FromCell a => FromCell (Either Position a) where
     fromCell c = case valueCell c of
                    NoCell pos -> Left pos
                    _ -> Right $ fromCell c
+
+valueCell :: Cell -> Cell
+valueCell (FormulaCell _ _ valuecell) = valuecell
+valueCell valuecell = valuecell
 
 catCells :: [Cell] -> [Cell]
 catCells cells = filter noCell cells

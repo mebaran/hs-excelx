@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                hs-excelx
-version:             0.5.1.0
+version:             0.5.2.0
 synopsis:            HS-Excelx provides basic read-only access to Excel 2007 and 2010 documents in XLSX format.
 -- description:         
 license:             BSD3
