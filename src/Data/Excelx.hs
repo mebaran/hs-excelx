@@ -196,10 +196,13 @@ cell cellpos = do
   (xlsx, sheetx) <- ask
   return $ parseCell xlsx sheetx cellpos
 
-column :: MonadReader Sheet m => Int -> m [Cell]
-column colidx = do
+sparseColumn :: MonadReader Sheet m => Int -> m [Cell]
+sparseColumn colidx = do
   (_, sheetx) <- ask
-  liftM catCells $ mapM cell $ map (flip R1C1 colidx) [1 .. maxRow sheetx]
+  mapM cell $ map (flip R1C1 colidx) [1 .. maxRow sheetx]
+
+column :: MonadReader Sheet m => Int -> m [Cell]
+column colidx = liftM catCells (sparseColumn colidx)
 
 inExcel :: b -> Reader b c -> c
 inExcel = flip runReader
