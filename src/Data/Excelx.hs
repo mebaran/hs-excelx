@@ -82,8 +82,8 @@ valueCell valuecell = valuecell
 catCells :: [Cell] -> [Cell]
 catCells cells = filter noCell cells
     where noCell c = case c of
-              NoCell _ -> True
-              _ -> False
+              NoCell _ -> False
+              _ -> True
 
 a1form :: Position -> T.Text
 a1form (A1 t) = t
