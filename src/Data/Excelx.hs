@@ -174,45 +174,46 @@ openExcelx f = do
 
 type Sheet = (Excelx, Cursor)
 type Row = [Cell]
+type ExcelReader a = ReaderT (Excelx, Cursor) Maybe a
 
-sheet :: MonadReader Excelx m => T.Text -> m (Maybe Sheet)
+sheet :: MonadReader Excelx m => T.Text -> m (Maybe (Excelx, Cursor))
 sheet name = do
   xlsx <- ask
   let sheetx = extractSheet name xlsx
   return $ fmap (\sheetxml -> (xlsx, sheetxml)) sheetx
 
-row :: MonadReader Sheet m => Int -> m Row
+row :: MonadReader (Excelx, Cursor) m => Int -> m [Cell]
 row num = do
   (xlsx, sheetx) <- ask
   return $ parseRow xlsx sheetx num
 
-rows :: MonadReader Sheet m => m [Row]
+rows :: MonadReader (Excelx, Cursor) m => m [Row]
 rows = do
   (_, sheetx) <- ask
   mapM row [1 .. maxRow sheetx]
 
-cell :: MonadReader Sheet m => Position -> m (Cell)  
+cell :: MonadReader (Excelx, Cursor) m => Position -> m Cell
 cell cellpos = do
   (xlsx, sheetx) <- ask
   return $ parseCell xlsx sheetx cellpos
 
-sparseColumn :: MonadReader Sheet m => Int -> m [Cell]
+sparseColumn :: MonadReader (Excelx, Cursor) m => Int -> m [Cell]
 sparseColumn colidx = do
   (_, sheetx) <- ask
   mapM cell $ map (flip R1C1 colidx) [1 .. maxRow sheetx]
 
-column :: MonadReader Sheet m => Int -> m [Cell]
+column :: MonadReader (Excelx, Cursor) m => Int -> m [Cell]
 column colidx = liftM catCells (sparseColumn colidx)
 
-inExcel :: b -> Reader b c -> c
-inExcel = flip runReader
+inExcel :: b -> ReaderT b m a -> m a
+inExcel = flip runReaderT
 
-inSheet :: MonadReader Excelx m => T.Text -> Reader Sheet a -> m (Maybe a)
+inSheet :: MonadReader Excelx m => T.Text -> ExcelReader a -> m (Maybe a)
 inSheet name action = do
   maybeSheet <- sheet name
   case maybeSheet of
-    Just sheetx -> return $ Just $ runReader action sheetx
-    Nothing -> return Nothing
+    Just sheetx -> return $ runReaderT action sheetx
+    Nothing -> fail "Sheet not found."
 
-inExcelSheet :: Excelx -> T.Text -> Reader Sheet a -> Maybe a
+inExcelSheet :: Monad m => Excelx -> T.Text -> ExcelReader a -> m (Maybe a)
 inExcelSheet xlsx name action = inExcel xlsx $ inSheet name action
