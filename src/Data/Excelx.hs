@@ -208,12 +208,12 @@ column colidx = liftM catCells (sparseColumn colidx)
 inExcel :: b -> ReaderT b m a -> m a
 inExcel = flip runReaderT
 
-inSheet :: MonadReader Excelx m => T.Text -> ExcelReader a -> m (Maybe a)
+inSheet :: MonadReader Excelx m => T.Text -> ReaderT (Excelx, Cursor) m b -> m b
 inSheet name action = do
   maybeSheet <- sheet name
   case maybeSheet of
-    Just sheetx -> return $ runReaderT action sheetx
+    Just sheetx -> runReaderT action sheetx
     Nothing -> fail "Sheet not found."
 
-inExcelSheet :: Monad m => Excelx -> T.Text -> ExcelReader a -> m (Maybe a)
+inExcelSheet :: Monad m => Excelx -> T.Text -> ReaderT (Excelx, Cursor) (ReaderT Excelx m) a -> m a
 inExcelSheet xlsx name action = inExcel xlsx $ inSheet name action
